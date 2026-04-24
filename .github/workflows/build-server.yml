@@ -1,0 +1,153 @@
+name: Build Minecraft Paper Server
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  build-server:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to push back to repository
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      
+      - name: Create server directory
+        run: mkdir -p server/plugins
+      
+      - name: Download Paper 1.21.5
+        run: |
+          cd server
+          curl -o paper.jar https://fill-data.papermc.io/v1/objects/2ae6ae22adf417699746e0f89fc2ef6cb6ee050a5f6608cee58f0535d60b509e/paper-1.21.5-114.jar
+      
+      - name: Download Slimefun4 RC
+        run: |
+          cd server/plugins
+          curl -L -o Slimefun4.jar https://blob.build/project/Slimefun4/RC
+      
+      - name: Create eula.txt
+        run: echo "eula=true" > server/eula.txt
+      
+      - name: Create server.properties
+        run: |
+          cat > server/server.properties << 'EOF'
+          server-port=25565
+          online-mode=false
+          max-players=20
+          level-name=world
+          view-distance=10
+          simulation-distance=10
+          motd=A Paper 1.21.5 Server with Slimefun4
+          EOF
+      
+      - name: Run Minecraft server to generate world
+        run: |
+          cd server
+          # Run server to generate world (allow time for generation)
+          timeout 180s java -Xmx2G -jar paper.jar nogui || true
+          
+          # Wait for world to fully generate
+          sleep 30
+          
+          # Gracefully stop the server
+          echo stop | java -Xmx2G -jar paper.jar nogui || true
+          
+          # Wait for final save
+          sleep 10
+      
+      - name: Clean up temporary files
+        run: |
+          cd server
+          # Remove logs and unnecessary files
+          rm -rf logs/
+          rm -f *.log
+          rm -f usercache.json
+          rm -f banned-ips.json
+          rm -f banned-players.json
+          rm -f ops.json
+          rm -f whitelist.json
+          # Remove the jar to save space (user can download fresh copy)
+          rm -f paper.jar
+      
+      - name: Create zip archive
+        run: |
+          ZIP_NAME="minecraft-server-$(date +'%Y%m%d-%H%M%S').zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          zip -r "$ZIP_NAME" server/
+      
+      - name: Configure git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+      
+      - name: Push zip to repository (server-builds branch)
+        run: |
+          BRANCH_NAME="server-builds"
+          
+          # Checkout or create the builds branch
+          if git ls-remote --heads origin $BRANCH_NAME | grep -q $BRANCH_NAME; then
+            git fetch origin $BRANCH_NAME
+            git checkout $BRANCH_NAME
+            git pull origin $BRANCH_NAME
+          else
+            git checkout -b $BRANCH_NAME
+          fi
+          
+          # Create builds directory if it doesn't exist
+          mkdir -p builds
+          
+          # Move zip file to builds directory
+          mv ${{ env.ZIP_NAME }} builds/
+          
+          # Create or update latest.txt with the newest zip name
+          echo "${{ env.ZIP_NAME }}" > builds/latest.txt
+          
+          # Generate a simple HTML index for easy downloading (optional)
+          cat > builds/index.html << EOF
+          <!DOCTYPE html>
+          <html>
+          <head><title>Minecraft Server Builds</title></head>
+          <body>
+          <h1>Minecraft Paper 1.21.5 + Slimefun4 Server Builds</h1>
+          <p>Latest build: <a href="${{ env.ZIP_NAME }}">${{ env.ZIP_NAME }}</a></p>
+          <hr>
+          <ul>
+          $(for f in *.zip; do echo "<li><a href=\"$f\">$f</a></li>"; done)
+          </ul>
+          </body>
+          </html>
+          EOF
+          
+          # Add and commit changes
+          git add builds/
+          git commit -m "Add Minecraft server build: ${{ env.ZIP_NAME }} [skip ci]"
+          
+          # Push to repository
+          git push origin $BRANCH_NAME
+      
+      - name: Update main branch reference (optional)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          git checkout main || git checkout master
+          git pull origin main || git pull origin master
+          
+          # Create or update latest-server.info with build info
+          cat > latest-server.info << EOF
+          Latest server build: ${{ env.ZIP_NAME }}
+          Build date: $(date)
+          Branch: server-builds
+          Direct download: https://raw.githubusercontent.com/${{ github.repository }}/server-builds/builds/${{ env.ZIP_NAME }}
+          EOF
+          
+          git add latest-server.info
+          git commit -m "Update latest server build reference [skip ci]" || echo "No changes to commit"
+          git push origin main || git push origin master
